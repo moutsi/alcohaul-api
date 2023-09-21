@@ -1,6 +1,8 @@
 const express = require('express');
 const { Client } = require('pg');
-
+const jwt = require('jsonwebtoken');
+const bcrypt = require ('bcrypt');
+require ('dotenv').config();
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -10,11 +12,77 @@ const client = new Client({
   database: process.env.DB_NAME,
   password: process.env.DB_PASSWORD,
   port: process.env.DB_PORT,
+  ssl: {
+    rejectUnauthorized: false, // Set to false if using a self-signed certificate
+  }
 });
 
-client.connect();
+
 
 app.use(express.json());
+app.use(async (req, res, next) => {
+  try {
+    await client.connect();
+    next();
+  } catch (error) {
+    console.error('Error connecting to the database:', error);
+    res.status(500).json({ error: 'An error occurred' });
+  }
+});
+function authenticateToken(req, res, next) {
+  const token = req.header('Authorization');
+  if (!token) return res.status(401).json({ message: 'Access denied' });
+
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    if (err) return res.status(403).json({ message: 'Invalid token' });
+    req.user = user;
+    next();
+  });
+}
+
+// User Registration
+app.post('/register', async (req, res) => {
+  const { username, password } = req.body;
+
+  try {
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const insertQuery = 'INSERT INTO users (username, password) VALUES ($1, $2)';
+    await client.query(insertQuery, [username, hashedPassword]);
+    
+    res.status(201).json({ message: 'User registered successfully' });
+  } catch (error) {
+    console.error('Error registering user:', error);
+    res.status(500).json({ error: 'An error occurred' });
+  }
+});
+
+// User Login
+app.post('/login', async (req, res) => {
+  const { username, password } = req.body;
+
+  try {
+    const query = 'SELECT * FROM users WHERE username = $1';
+    const result = await client.query(query, [username]);
+    
+    if (result.rows.length === 0) {
+      return res.status(401).json({ message: 'Authentication failed' });
+    }
+
+    const user = result.rows[0];
+    const isValidPassword = await bcrypt.compare(password, user.password);
+    if (!isValidPassword) {
+      return res.status(401).json({ message: 'Authentication failed' });
+    }
+
+    const token = jwt.sign({ id: user.id, username: user.username }, process.env.JWT_SECRET);
+    res.json({ token });
+  } catch (error) {
+    console.error('Error logging in:', error);
+    res.status(500).json({ error: 'An error occurred' });
+  }
+});
+
+
 
 // Retrieve all records from a table
 app.get('/:table', async (req, res) => {
@@ -64,6 +132,37 @@ app.put('/:table/:id', async (req, res) => {
     res.status(500).json({ error: 'An error occurred' });
   }
 });
+// Create a new table
+app.post('/create-table', async (req, res) => {
+  const { tableName, fields } = req.body;
+
+  try {
+    const createTableQuery = `CREATE TABLE ${tableName} (${fields})`;
+    await client.query(createTableQuery);
+    
+    res.status(201).json({ message: 'Table created successfully' });
+  } catch (error) {
+    console.error('Error creating table:', error);
+    res.status(500).json({ error: 'An error occurred' });
+  }
+});
+
+// Add fields to an existing table
+app.post('/add-fields/:table', async (req, res) => {
+  const { table } = req.params;
+  const { fields } = req.body;
+
+  try {
+    const addFieldsQuery = `ALTER TABLE ${table} ADD COLUMN ${fields}`;
+    await client.query(addFieldsQuery);
+    
+    res.status(201).json({ message: 'Fields added to table successfully' });
+  } catch (error) {
+    console.error('Error adding fields to table:', error);
+    res.status(500).json({ error: 'An error occurred' });
+  }
+});
+
 
 // Delete a record from a table
 app.delete('/:table/:id', async (req, res) => {
@@ -79,6 +178,13 @@ app.delete('/:table/:id', async (req, res) => {
     res.status(500).json({ error: 'An error occurred' });
   }
 });
+
+  try {
+    client.end();
+  } catch (error) {
+    console.error('Error disconnecting from the database:', error);
+  }
+
 
 app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
